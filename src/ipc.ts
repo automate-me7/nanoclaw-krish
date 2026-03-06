@@ -3,9 +3,18 @@ import path from 'path';
 
 import { CronExpressionParser } from 'cron-parser';
 
-import { DATA_DIR, IPC_POLL_INTERVAL, TIMEZONE } from './config.js';
+import { DATA_DIR, IPC_POLL_INTERVAL, TIMEZONE, CHROMA_ENABLED } from './config.js';
 import { AvailableGroup } from './container-runner.js';
-import { createTask, deleteTask, getTaskById, updateTask } from './db.js';
+import {
+  createTask,
+  deleteTask,
+  getTaskById,
+  updateTask,
+  logGuardTrigger,
+  logTokenUsage,
+  upsertBusinessFact,
+} from './db.js';
+import { semanticSearch, isChromaAvailable } from './chromadb.js';
 import { isValidGroupFolder } from './group-folder.js';
 import { logger } from './logger.js';
 import { RegisteredGroup } from './types.js';
@@ -143,6 +152,162 @@ export function startIpcWatcher(deps: IpcDeps): void {
         }
       } catch (err) {
         logger.error({ err, sourceGroup }, 'Error reading IPC tasks directory');
+      }
+
+      // Process guard logs from this group's IPC directory
+      const guardLogsDir = path.join(ipcBaseDir, sourceGroup, 'guard_logs');
+      try {
+        if (fs.existsSync(guardLogsDir)) {
+          const guardFiles = fs
+            .readdirSync(guardLogsDir)
+            .filter((f) => f.endsWith('.json'));
+          for (const file of guardFiles) {
+            const filePath = path.join(guardLogsDir, file);
+            try {
+              const data = JSON.parse(fs.readFileSync(filePath, 'utf-8'));
+              if (data.type === 'guard_trigger') {
+                const groupFolder = data.group_folder || sourceGroup;
+                logGuardTrigger({
+                  group_folder: groupFolder,
+                  reason: data.reason,
+                  turn_count: data.turn_count,
+                  token_count: data.token_count,
+                  task_type: data.task_type,
+                });
+
+                // Find the associated chatJid for this group folder to send the alert back
+                const registeredGroups = deps.registeredGroups();
+                let targetJid: string | undefined;
+                // Try to find the chatJid that owns this folder
+                for (const [jid, group] of Object.entries(registeredGroups)) {
+                  if (group.folder === groupFolder) {
+                    targetJid = jid;
+                    break;
+                  }
+                }
+
+                if (targetJid) {
+                  const isSoftWarning = data.reason === 'token_budget_soft';
+                  const alertMessage = isSoftWarning
+                    ? `⚠️ *Token Budget Warning:* Usage at ${data.token_count} tokens (soft limit: 50,000). The session is still running but approaching the hard limit.`
+                    : `🛑 *System Alert:* Agent session terminated automatically. Reason: ${data.reason}. Tokens: ${data.token_count}, Turns: ${data.turn_count}.`;
+                  deps.sendMessage(targetJid, alertMessage).catch(err => {
+                    logger.error({ err, targetJid }, 'Failed to send guard trigger alert');
+                  });
+                } else {
+                  logger.warn({ groupFolder }, 'Could not find target JID to send guard trigger alert');
+                }
+
+                logger.info(
+                  { reason: data.reason, group: sourceGroup, alerted: !!targetJid },
+                  'Guard trigger logged and alerted',
+                );
+              }
+              fs.unlinkSync(filePath);
+            } catch (err) {
+              logger.error(
+                { file, sourceGroup, err },
+                'Error processing guard log',
+              );
+              fs.unlinkSync(filePath);
+            }
+          }
+        }
+      } catch (err) {
+        logger.error({ err, sourceGroup }, 'Error reading guard logs directory');
+      }
+
+      // Process token usage logs from this group's IPC directory
+      const tokenLogsDir = path.join(ipcBaseDir, sourceGroup, 'token_logs');
+      try {
+        if (fs.existsSync(tokenLogsDir)) {
+          const tokenFiles = fs
+            .readdirSync(tokenLogsDir)
+            .filter((f) => f.endsWith('.json'));
+          if (tokenFiles.length > 0) {
+            console.log(`[TOKEN IPC] Detected ${tokenFiles.length} token usage file(s) in ${tokenLogsDir}`);
+          }
+          for (const file of tokenFiles) {
+            console.log(`[TOKEN IPC] Processing token file: ${file}`);
+            const filePath = path.join(tokenLogsDir, file);
+            try {
+              const data = JSON.parse(fs.readFileSync(filePath, 'utf-8'));
+              if (data.type === 'token_usage') {
+                logTokenUsage({
+                  group_folder: data.group_folder || sourceGroup,
+                  model: data.model || 'unknown',
+                  input_tokens: data.input_tokens || 0,
+                  output_tokens: data.output_tokens || 0,
+                  cache_read_tokens: data.cache_read_tokens,
+                  cache_creation_tokens: data.cache_creation_tokens,
+                  session_id: data.session_id,
+                  task_type: data.task_type,
+                });
+                logger.debug(
+                  {
+                    group: sourceGroup,
+                    model: data.model,
+                    input: data.input_tokens,
+                    output: data.output_tokens,
+                  },
+                  'Token usage logged',
+                );
+              }
+              fs.unlinkSync(filePath);
+            } catch (err) {
+              logger.error(
+                { file, sourceGroup, err },
+                'Error processing token log',
+              );
+              fs.unlinkSync(filePath);
+            }
+          }
+        }
+      } catch (err) {
+        logger.error({ err, sourceGroup }, 'Error reading token logs directory');
+      }
+
+      // Process semantic search requests
+      const searchRequestsDir = path.join(ipcBaseDir, sourceGroup, 'search_requests');
+      try {
+        if (fs.existsSync(searchRequestsDir) && CHROMA_ENABLED && isChromaAvailable()) {
+          const searchFiles = fs
+            .readdirSync(searchRequestsDir)
+            .filter((f) => f.endsWith('.json'));
+          for (const file of searchFiles) {
+            const filePath = path.join(searchRequestsDir, file);
+            try {
+              const data = JSON.parse(fs.readFileSync(filePath, 'utf-8'));
+              if (data.type === 'semantic_search' && data.request_id) {
+                const results = await semanticSearch(
+                  data.query,
+                  data.max_results || 5,
+                );
+                // Write results for the agent to read
+                const resultsDir = path.join(ipcBaseDir, sourceGroup, 'search_results');
+                fs.mkdirSync(resultsDir, { recursive: true });
+                const resultFile = path.join(resultsDir, `${data.request_id}.json`);
+                const tempPath = `${resultFile}.tmp`;
+                fs.writeFileSync(tempPath, JSON.stringify({ results }));
+                fs.renameSync(tempPath, resultFile);
+
+                logger.debug(
+                  { group: sourceGroup, query: data.query, resultCount: results.length },
+                  'Semantic search completed',
+                );
+              }
+              fs.unlinkSync(filePath);
+            } catch (err) {
+              logger.error(
+                { file, sourceGroup, err },
+                'Error processing search request',
+              );
+              fs.unlinkSync(filePath);
+            }
+          }
+        }
+      } catch (err) {
+        logger.error({ err, sourceGroup }, 'Error reading search requests directory');
       }
     }
 
@@ -384,6 +549,18 @@ export async function processTaskIpc(
       break;
 
     default:
+      // Handle store_fact IPC for Tier 3 memory
+      if (data.type === 'store_fact' && 'key' in data && 'value' in data && 'category' in data) {
+        const key = data.key as string;
+        const value = data.value as string;
+        const category = data.category as string;
+        upsertBusinessFact(key, value, category);
+        logger.info(
+          { key, category, sourceGroup },
+          'Business fact stored via IPC',
+        );
+        break;
+      }
       logger.warn({ type: data.type }, 'Unknown IPC task type');
   }
 }

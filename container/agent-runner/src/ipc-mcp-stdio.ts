@@ -280,6 +280,406 @@ Use available_groups.json to find the JID for a group. The folder name must be c
   },
 );
 
+// --- Tier 3: Business Facts ---
+
+const FACTS_SNAPSHOT_FILE = path.join(IPC_DIR, 'business_facts.json');
+
+server.tool(
+  'store_business_fact',
+  `Store or update a business fact in long-term memory. Facts persist across sessions.
+  
+Use categories to organize facts:
+• "contact" — names, roles, companies, preferences
+• "process" — how things work, SOPs, policies
+• "preference" — user/team preferences and settings
+• "reference" — API keys, URLs, account numbers
+• "general" — anything else
+
+Examples:
+• key="ceo_name", value="Jane Smith", category="contact"
+• key="crm_url", value="https://crm.example.com", category="reference"`,
+  {
+    key: z.string().describe('Unique identifier for the fact (e.g., "ceo_name", "crm_url")'),
+    value: z.string().describe('The fact value'),
+    category: z.string().describe('Category: contact, process, preference, reference, or general'),
+  },
+  async (args) => {
+    const data = {
+      type: 'store_fact',
+      key: args.key,
+      value: args.value,
+      category: args.category,
+      groupFolder,
+      timestamp: new Date().toISOString(),
+    };
+
+    writeIpcFile(TASKS_DIR, data);
+
+    return {
+      content: [{ type: 'text' as const, text: `Fact stored: ${args.key} = ${args.value} (${args.category})` }],
+    };
+  },
+);
+
+server.tool(
+  'get_business_facts',
+  'Retrieve stored business facts from long-term memory. Returns all facts, optionally filtered by category.',
+  {
+    category: z.string().optional().describe('Filter by category (e.g., "contact", "process")'),
+  },
+  async (args) => {
+    try {
+      if (!fs.existsSync(FACTS_SNAPSHOT_FILE)) {
+        return { content: [{ type: 'text' as const, text: 'No business facts stored yet.' }] };
+      }
+
+      const allFacts = JSON.parse(fs.readFileSync(FACTS_SNAPSHOT_FILE, 'utf-8'));
+      const filtered = args.category
+        ? allFacts.filter((f: { category: string }) => f.category === args.category)
+        : allFacts;
+
+      if (filtered.length === 0) {
+        return { content: [{ type: 'text' as const, text: args.category ? `No facts in category "${args.category}".` : 'No business facts stored yet.' }] };
+      }
+
+      const formatted = filtered
+        .map((f: { key: string; value: string; category: string; updated_at: string }) =>
+          `• [${f.category}] ${f.key}: ${f.value} (updated: ${f.updated_at})`)
+        .join('\n');
+
+      return { content: [{ type: 'text' as const, text: `Business facts:\n${formatted}` }] };
+    } catch (err) {
+      return {
+        content: [{ type: 'text' as const, text: `Error reading facts: ${err instanceof Error ? err.message : String(err)}` }],
+      };
+    }
+  },
+);
+
+server.tool(
+  'search_business_facts',
+  'Search business facts by keyword. Searches across keys, values, and categories.',
+  {
+    query: z.string().describe('Search term to find in fact keys, values, or categories'),
+  },
+  async (args) => {
+    try {
+      if (!fs.existsSync(FACTS_SNAPSHOT_FILE)) {
+        return { content: [{ type: 'text' as const, text: 'No business facts stored yet.' }] };
+      }
+
+      const allFacts = JSON.parse(fs.readFileSync(FACTS_SNAPSHOT_FILE, 'utf-8'));
+      const lower = args.query.toLowerCase();
+      const matches = allFacts.filter(
+        (f: { key: string; value: string; category: string }) =>
+          f.key.toLowerCase().includes(lower) ||
+          f.value.toLowerCase().includes(lower) ||
+          f.category.toLowerCase().includes(lower),
+      );
+
+      if (matches.length === 0) {
+        return { content: [{ type: 'text' as const, text: `No facts matching "${args.query}".` }] };
+      }
+
+      const formatted = matches
+        .map((f: { key: string; value: string; category: string }) =>
+          `• [${f.category}] ${f.key}: ${f.value}`)
+        .join('\n');
+
+      return { content: [{ type: 'text' as const, text: `Search results for "${args.query}":\n${formatted}` }] };
+    } catch (err) {
+      return {
+        content: [{ type: 'text' as const, text: `Error searching facts: ${err instanceof Error ? err.message : String(err)}` }],
+      };
+    }
+  },
+);
+
+// --- Tier 4: Semantic Search (ChromaDB) ---
+
+const SEARCH_RESULTS_DIR = path.join(IPC_DIR, 'search_results');
+const SEARCH_REQUESTS_DIR = path.join(IPC_DIR, 'search_requests');
+
+server.tool(
+  'semantic_search',
+  `Search your long-term memory using natural language. This searches across past conversations, voice transcripts, and daily digests using semantic similarity.
+  
+Use this when you need to recall past discussions, find relevant context, or look up information from previous interactions.
+
+Example queries:
+• "What did we discuss about the marketing budget?"
+• "Meeting notes from last week"
+• "User's preferred communication style"`,
+  {
+    query: z.string().describe('Natural language search query'),
+    max_results: z.number().optional().default(5).describe('Maximum number of results (default: 5)'),
+  },
+  async (args) => {
+    try {
+      // Write search request for the host to process
+      fs.mkdirSync(SEARCH_REQUESTS_DIR, { recursive: true });
+      const requestId = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+      const requestFile = path.join(SEARCH_REQUESTS_DIR, `${requestId}.json`);
+      const requestTempPath = `${requestFile}.tmp`;
+      fs.writeFileSync(requestTempPath, JSON.stringify({
+        type: 'semantic_search',
+        query: args.query,
+        max_results: args.max_results || 5,
+        group_folder: groupFolder,
+        request_id: requestId,
+        timestamp: new Date().toISOString(),
+      }));
+      fs.renameSync(requestTempPath, requestFile);
+
+      // Wait for results (poll with timeout)
+      const resultFile = path.join(SEARCH_RESULTS_DIR, `${requestId}.json`);
+      fs.mkdirSync(SEARCH_RESULTS_DIR, { recursive: true });
+      const maxWait = 10000; // 10 seconds
+      const pollInterval = 200;
+      let waited = 0;
+
+      while (waited < maxWait) {
+        if (fs.existsSync(resultFile)) {
+          const results = JSON.parse(fs.readFileSync(resultFile, 'utf-8'));
+          fs.unlinkSync(resultFile);
+
+          if (!results.results || results.results.length === 0) {
+            return { content: [{ type: 'text' as const, text: `No results found for "${args.query}".` }] };
+          }
+
+          const formatted = results.results
+            .map((r: { document: string; metadata: Record<string, string>; distance: number }, i: number) =>
+              `--- Result ${i + 1} (relevance: ${(1 - r.distance).toFixed(2)}) ---\nSource: ${r.metadata?.source || 'unknown'} | Group: ${r.metadata?.group_folder || 'unknown'} | Date: ${r.metadata?.timestamp || 'unknown'}\n${r.document}`)
+            .join('\n\n');
+
+          return { content: [{ type: 'text' as const, text: `Memory search results for "${args.query}":\n\n${formatted}` }] };
+        }
+
+        await new Promise((resolve) => setTimeout(resolve, pollInterval));
+        waited += pollInterval;
+      }
+
+      return { content: [{ type: 'text' as const, text: `Semantic search timed out. The memory store may not be available.` }] };
+    } catch (err) {
+      return {
+        content: [{ type: 'text' as const, text: `Error during semantic search: ${err instanceof Error ? err.message : String(err)}` }],
+      };
+    }
+  },
+);
+
+// --- Senri CRM Integration ---
+
+import { initSenri, senriGet, isSenriConfigured } from './senri.js';
+
+if (process.env.SENRI_API_KEY && process.env.SENRI_API_SECRET) {
+  initSenri(process.env.SENRI_API_KEY, process.env.SENRI_API_SECRET);
+}
+
+server.tool(
+  'senri_get_customers',
+  'Get a list of customers (retailers) from Senri CRM. Returns id, name, code, region, tier, telephone, location, and status.',
+  {
+    updated_at_gteq: z.string().optional().describe('Filter by last updated date (e.g., "20240101")'),
+    page: z.number().optional().describe('Page number for pagination'),
+  },
+  async (args) => {
+    if (!isSenriConfigured()) {
+      return { content: [{ type: 'text' as const, text: 'Senri CRM not configured. Set SENRI_API_KEY and SENRI_API_SECRET in .env.' }], isError: true };
+    }
+    try {
+      const result = await senriGet('/api/external/sage/retailers', args);
+      return { content: [{ type: 'text' as const, text: JSON.stringify(result, null, 2) }] };
+    } catch (err) {
+      return { content: [{ type: 'text' as const, text: `Senri error: ${err instanceof Error ? err.message : String(err)}` }], isError: true };
+    }
+  },
+);
+
+server.tool(
+  'senri_search_customer',
+  'Search for a specific customer in Senri CRM by code, external key, or approval status.',
+  {
+    code: z.string().optional().describe('Customer code'),
+    external_unique_key: z.string().optional().describe('ERP external key'),
+    manager_status: z.number().optional().describe('1=Approved, 2=Declined, 3=Pending'),
+  },
+  async (args) => {
+    if (!isSenriConfigured()) {
+      return { content: [{ type: 'text' as const, text: 'Senri CRM not configured. Set SENRI_API_KEY and SENRI_API_SECRET in .env.' }], isError: true };
+    }
+    try {
+      const result = await senriGet('/api/external/sage/retailers/search', args);
+      return { content: [{ type: 'text' as const, text: JSON.stringify(result, null, 2) }] };
+    } catch (err) {
+      return { content: [{ type: 'text' as const, text: `Senri error: ${err instanceof Error ? err.message : String(err)}` }], isError: true };
+    }
+  },
+);
+
+server.tool(
+  'senri_get_users',
+  'Get sales team users from Senri CRM. Returns id, name, code, role (manager/staff), status, and user groups.',
+  {
+    page: z.number().optional().describe('Page number'),
+    status: z.number().optional().describe('1=active (default)'),
+    updated_after: z.string().optional().describe('Filter by update date (e.g., "2024-01-01")'),
+  },
+  async (args) => {
+    if (!isSenriConfigured()) {
+      return { content: [{ type: 'text' as const, text: 'Senri CRM not configured. Set SENRI_API_KEY and SENRI_API_SECRET in .env.' }], isError: true };
+    }
+    try {
+      const result = await senriGet('/open_api/v1/users', args);
+      return { content: [{ type: 'text' as const, text: JSON.stringify(result, null, 2) }] };
+    } catch (err) {
+      return { content: [{ type: 'text' as const, text: `Senri error: ${err instanceof Error ? err.message : String(err)}` }], isError: true };
+    }
+  },
+);
+
+server.tool(
+  'senri_get_visit_reports',
+  'Get visit reports from Senri CRM. Includes answers, photos, actions, retailer, and user details.',
+  {
+    start_date: z.string().describe('Start date (YYYY-MM-DD, required)'),
+    end_date: z.string().describe('End date (YYYY-MM-DD, required)'),
+    user_id: z.number().optional().describe('Filter by user ID'),
+    retailer_id: z.number().optional().describe('Filter by retailer ID'),
+    page: z.number().optional().describe('Page number'),
+  },
+  async (args) => {
+    if (!isSenriConfigured()) {
+      return { content: [{ type: 'text' as const, text: 'Senri CRM not configured. Set SENRI_API_KEY and SENRI_API_SECRET in .env.' }], isError: true };
+    }
+    try {
+      const result = await senriGet('/open_api/v1/visit_reports', args);
+      return { content: [{ type: 'text' as const, text: JSON.stringify(result, null, 2) }] };
+    } catch (err) {
+      return { content: [{ type: 'text' as const, text: `Senri error: ${err instanceof Error ? err.message : String(err)}` }], isError: true };
+    }
+  },
+);
+
+server.tool(
+  'senri_get_visits',
+  'Get check-in/check-out visit records from Senri CRM. Includes user, retailer, timestamps, closeness, and visit result.',
+  {
+    start_date: z.string().describe('Start date (YYYY-MM-DD, required)'),
+    end_date: z.string().describe('End date (YYYY-MM-DD, required)'),
+    page: z.number().optional().describe('Page number'),
+  },
+  async (args) => {
+    if (!isSenriConfigured()) {
+      return { content: [{ type: 'text' as const, text: 'Senri CRM not configured. Set SENRI_API_KEY and SENRI_API_SECRET in .env.' }], isError: true };
+    }
+    try {
+      const result = await senriGet('/open_api/v1/visits', args);
+      return { content: [{ type: 'text' as const, text: JSON.stringify(result, null, 2) }] };
+    } catch (err) {
+      return { content: [{ type: 'text' as const, text: `Senri error: ${err instanceof Error ? err.message : String(err)}` }], isError: true };
+    }
+  },
+);
+
+server.tool(
+  'senri_get_reminders',
+  'Get scheduled visit reminders from Senri CRM. Includes user, retailer, datetime, note, objectives, and status.',
+  {
+    start_date: z.string().describe('Start date (YYYY-MM-DD, required)'),
+    end_date: z.string().describe('End date (YYYY-MM-DD, required)'),
+    page: z.number().optional().describe('Page number'),
+  },
+  async (args) => {
+    if (!isSenriConfigured()) {
+      return { content: [{ type: 'text' as const, text: 'Senri CRM not configured. Set SENRI_API_KEY and SENRI_API_SECRET in .env.' }], isError: true };
+    }
+    try {
+      const result = await senriGet('/open_api/v1/reminders', args);
+      return { content: [{ type: 'text' as const, text: JSON.stringify(result, null, 2) }] };
+    } catch (err) {
+      return { content: [{ type: 'text' as const, text: `Senri error: ${err instanceof Error ? err.message : String(err)}` }], isError: true };
+    }
+  },
+);
+
+server.tool(
+  'senri_get_transactions',
+  'Get trade/transaction records from Senri CRM. Includes deals, payments, deliveries, retailer, totals, and statuses.',
+  {
+    created_at_gteq: z.string().optional().describe('Created after date (e.g., "20240101")'),
+    created_at_lteq: z.string().optional().describe('Created before date (e.g., "20240201")'),
+    page: z.number().optional().describe('Page number'),
+  },
+  async (args) => {
+    if (!isSenriConfigured()) {
+      return { content: [{ type: 'text' as const, text: 'Senri CRM not configured. Set SENRI_API_KEY and SENRI_API_SECRET in .env.' }], isError: true };
+    }
+    try {
+      const result = await senriGet('/api/external/v1/erp/trades', args);
+      return { content: [{ type: 'text' as const, text: JSON.stringify(result, null, 2) }] };
+    } catch (err) {
+      return { content: [{ type: 'text' as const, text: `Senri error: ${err instanceof Error ? err.message : String(err)}` }], isError: true };
+    }
+  },
+);
+
+server.tool(
+  'senri_search_transaction',
+  'Search for a specific transaction in Senri CRM by invoice number or trade number.',
+  {
+    invoice_number: z.string().optional().describe('Invoice number to search'),
+    trade_number: z.string().optional().describe('Trade number to search'),
+  },
+  async (args) => {
+    if (!isSenriConfigured()) {
+      return { content: [{ type: 'text' as const, text: 'Senri CRM not configured. Set SENRI_API_KEY and SENRI_API_SECRET in .env.' }], isError: true };
+    }
+    try {
+      const result = await senriGet('/api/external/v1/erp/trades/search', args);
+      return { content: [{ type: 'text' as const, text: JSON.stringify(result, null, 2) }] };
+    } catch (err) {
+      return { content: [{ type: 'text' as const, text: `Senri error: ${err instanceof Error ? err.message : String(err)}` }], isError: true };
+    }
+  },
+);
+
+server.tool(
+  'senri_get_products',
+  'Get products from Senri CRM. Returns id, code, name, category, unit, price tiers, and status.',
+  {
+    updated_at_gteq: z.string().optional().describe('Filter by last updated date (e.g., "20240101")'),
+  },
+  async (args) => {
+    if (!isSenriConfigured()) {
+      return { content: [{ type: 'text' as const, text: 'Senri CRM not configured. Set SENRI_API_KEY and SENRI_API_SECRET in .env.' }], isError: true };
+    }
+    try {
+      const result = await senriGet('/api/external/sage/products', args);
+      return { content: [{ type: 'text' as const, text: JSON.stringify(result, null, 2) }] };
+    } catch (err) {
+      return { content: [{ type: 'text' as const, text: `Senri error: ${err instanceof Error ? err.message : String(err)}` }], isError: true };
+    }
+  },
+);
+
+server.tool(
+  'senri_get_inventory',
+  'Get main inventory list from Senri CRM. Returns inventory locations (use inventory ID to get per-product stock contents).',
+  {},
+  async () => {
+    if (!isSenriConfigured()) {
+      return { content: [{ type: 'text' as const, text: 'Senri CRM not configured. Set SENRI_API_KEY and SENRI_API_SECRET in .env.' }], isError: true };
+    }
+    try {
+      const result = await senriGet('/api/external/v1/erp/main_inventories');
+      return { content: [{ type: 'text' as const, text: JSON.stringify(result, null, 2) }] };
+    } catch (err) {
+      return { content: [{ type: 'text' as const, text: `Senri error: ${err instanceof Error ? err.message : String(err)}` }], isError: true };
+    }
+  },
+);
+
 // Start the stdio transport
 const transport = new StdioServerTransport();
 await server.connect(transport);

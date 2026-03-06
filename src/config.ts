@@ -61,3 +61,25 @@ export const TRIGGER_PATTERN = new RegExp(
 // Uses system timezone by default
 export const TIMEZONE =
   process.env.TZ || Intl.DateTimeFormat().resolvedOptions().timeZone;
+
+// Smart polling schedule (feature 5)
+export const SMART_POLLING_ENABLED =
+  (process.env.SMART_POLLING_ENABLED || 'false') === 'true';
+export const DAYTIME_POLL_INTERVAL = parseInt(
+  process.env.DAYTIME_POLL_INTERVAL || '300000',
+  10,
+); // 5 min
+export const EVENING_POLL_INTERVAL = parseInt(
+  process.env.EVENING_POLL_INTERVAL || '1800000',
+  10,
+); // 30 min
+export const OVERNIGHT_POLL_INTERVAL = parseInt(
+  process.env.OVERNIGHT_POLL_INTERVAL || '7200000',
+  10,
+); // 2 hrs
+
+// ChromaDB vector store (feature 6, Tier 4 memory)
+export const CHROMA_ENABLED =
+  (process.env.CHROMA_ENABLED || 'false') === 'true';
+export const CHROMA_HOST = process.env.CHROMA_HOST || 'http://localhost';
+export const CHROMA_PORT = parseInt(process.env.CHROMA_PORT || '8000', 10);

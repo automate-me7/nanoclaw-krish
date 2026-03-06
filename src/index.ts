@@ -6,6 +6,8 @@ import {
   IDLE_TIMEOUT,
   POLL_INTERVAL,
   TRIGGER_PATTERN,
+  CHROMA_ENABLED,
+  SMART_POLLING_ENABLED,
 } from './config.js';
 import './channels/index.js';
 import {
@@ -17,6 +19,7 @@ import {
   runContainerAgent,
   writeGroupsSnapshot,
   writeTasksSnapshot,
+  writeBusinessFactsSnapshot,
 } from './container-runner.js';
 import {
   cleanupOrphans,
@@ -43,6 +46,8 @@ import { startIpcWatcher } from './ipc.js';
 import { findChannel, formatMessages, formatOutbound } from './router.js';
 import { startSchedulerLoop } from './task-scheduler.js';
 import { Channel, NewMessage, RegisteredGroup } from './types.js';
+import { initChromaDB, ingestConversation, isChromaAvailable } from './chromadb.js';
+import { startPollingScheduler } from './polling-scheduler.js';
 import { logger } from './logger.js';
 
 // Re-export for backwards compatibility during refactor
@@ -243,6 +248,22 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
     return false;
   }
 
+  // --- ChromaDB ingestion: index the processed conversation ---
+  if (CHROMA_ENABLED && isChromaAvailable()) {
+    try {
+      await ingestConversation(
+        missedMessages.map((m) => ({
+          sender_name: m.sender_name,
+          content: m.content,
+          timestamp: m.timestamp,
+        })),
+        group.folder,
+      );
+    } catch (err) {
+      logger.warn({ err, group: group.name }, 'ChromaDB ingestion failed (non-fatal)');
+    }
+  }
+
   return true;
 }
 
@@ -280,15 +301,18 @@ async function runAgent(
     new Set(Object.keys(registeredGroups)),
   );
 
+  // Update business facts snapshot for the container to read (Tier 3 memory)
+  writeBusinessFactsSnapshot(group.folder);
+
   // Wrap onOutput to track session ID from streamed results
   const wrappedOnOutput = onOutput
     ? async (output: ContainerOutput) => {
-        if (output.newSessionId) {
-          sessions[group.folder] = output.newSessionId;
-          setSession(group.folder, output.newSessionId);
-        }
-        await onOutput(output);
+      if (output.newSessionId) {
+        sessions[group.folder] = output.newSessionId;
+        setSession(group.folder, output.newSessionId);
       }
+      await onOutput(output);
+    }
     : undefined;
 
   try {
@@ -535,6 +559,25 @@ async function main(): Promise<void> {
   });
   queue.setProcessMessagesFn(processGroupMessages);
   recoverPendingMessages();
+
+  // Initialize ChromaDB vector store if enabled (Tier 4 memory)
+  if (CHROMA_ENABLED) {
+    await initChromaDB();
+  }
+
+  // Start smart polling if enabled, otherwise use the default message loop
+  if (SMART_POLLING_ENABLED) {
+    logger.info('Smart polling scheduler enabled');
+    startPollingScheduler({
+      onPoll: async () => {
+        // Trigger message checks for all registered groups
+        for (const jid of Object.keys(registeredGroups)) {
+          queue.enqueueMessageCheck(jid);
+        }
+      },
+    });
+  }
+
   startMessageLoop().catch((err) => {
     logger.fatal({ err }, 'Message loop crashed unexpectedly');
     process.exit(1);
@@ -545,7 +588,7 @@ async function main(): Promise<void> {
 const isDirectRun =
   process.argv[1] &&
   new URL(import.meta.url).pathname ===
-    new URL(`file://${process.argv[1]}`).pathname;
+  new URL(`file://${process.argv[1]}`).pathname;
 
 if (isDirectRun) {
   main().catch((err) => {

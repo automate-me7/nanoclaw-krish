@@ -62,6 +62,14 @@ Then run `/setup`. Claude Code handles everything: dependencies, authentication,
 - **Web access** - Search and fetch content from the Web
 - **Container isolation** - Agents are sandboxed in Apple Container (macOS) or Docker (macOS/Linux)
 - **Agent Swarms** - Spin up teams of specialized agents that collaborate on complex tasks. NanoClaw is the first personal AI assistant to support agent swarms.
+- **Dynamic model routing** - Automatically selects Haiku, Sonnet, or Opus based on prompt complexity
+- **Loop guards** - Turn and token budget limits prevent runaway sessions with WhatsApp alerts
+- **Prompt caching** - Reduces API costs ~25-30% by caching system prompts and CLAUDE.md context
+- **Token usage logging** - Every session's token consumption logged to SQLite for cost tracking
+- **Smart polling schedule** - Time-of-day-aware message polling (fast by day, slow overnight)
+- **4-tier memory** - Active context → per-contact history → business facts → semantic vector search
+- **Senri CRM** - 10 MCP tools for customers, visits, transactions, products, inventory, and reminders
+- **Microsoft 365** - Teams, Outlook, and SharePoint access via MS365 MCP HTTP server
 - **Optional integrations** - Add Gmail (`/add-gmail`) and more via skills
 
 ## Usage
@@ -94,6 +102,113 @@ Or run `/customize` for guided changes.
 
 The codebase is small enough that Claude can safely modify it.
 
+## Custom Features
+
+### Dynamic Model Routing
+
+On startup, the agent runner fetches all available models from the Anthropic API via `client.models.list()` and dynamically resolves the latest Haiku, Sonnet, and Opus model IDs — no hardcoded model names. Each prompt is then routed to the best-fit model.
+
+**Routing logic (evaluated top to bottom, first match wins):**
+
+| Priority | Rule | Model Selected |
+|----------|------|---------------|
+| 1 — Direct override | Prompt contains the word **`haiku`** | → Haiku |
+| 2 — Direct override | Prompt contains the word **`opus`** | → Opus |
+| 3 — Direct override | Prompt contains the word **`sonnet`** | → Sonnet |
+| 4 — Short prompt | Prompt is **under 15 words** | → Haiku |
+| 5 — Triage keywords | Prompt contains: `triage`, `classify`, `status`, `lookup`, `yes/no` | → Haiku |
+| 6 — High-priority keywords | Prompt contains: `important`, `urgent`, `decision`, `strategy`, `meeting recording`, `external email` | → Opus |
+| 7 — Default | Everything else | → Sonnet |
+
+**Examples:**
+
+```
+"what's the status of the build?"          → Haiku  (keyword: status)
+"yes"                                      → Haiku  (under 15 words)
+"use haiku to summarize this document"     → Haiku  (direct override: haiku)
+"this is urgent, review the contract"      → Opus   (keyword: urgent)
+"use opus to draft the strategy doc"       → Opus   (direct override: opus)
+"draft a reply to Sarah's email"           → Sonnet (default, no keyword match)
+```
+
+The selected model is passed to the SDK via the `CLAUDE_MODEL` environment variable. Model IDs are logged at startup and on each query so you can verify which model handled each request. If a requested model tier (e.g., Opus) isn't available on your API key, it falls back to Sonnet.
+
+### Loop Guards
+
+Prevents runaway sessions that burn through your API budget:
+
+- **Container timeout (90s default)** — host-level watchdog that kills the Docker container if it produces zero stdout for the configured `CONTAINER_TIMEOUT` duration. Resets on every output chunk, so actively streaming agents are never affected. Catches genuinely frozen/unresponsive containers
+- **Consecutive error cap (8)** — if the agent produces 8 consecutive SDK-level errors without a single success, the session is killed. Any successful result resets the counter to 0
+- **Token soft limit (50k)** — sends a ⚠️ warning alert to the active chat. The session continues running
+- **Token hard limit (100k)** — sends a 🛑 kill alert and terminates the session immediately
+
+Error subtypes tracked: `error_during_execution`, `error_max_turns`, `error_max_budget_usd`, `error_max_structured_output_retries`.
+
+All guard triggers are:
+1. Sent as WhatsApp/chat alerts — soft limit warnings use ⚠️ and note the session is still running; hard kills use 🛑 and confirm termination
+2. Logged to the `guard_logs` SQLite table with timestamp, reason, turn/token counts, and task type
+
+### Prompt Caching
+
+Enabled automatically via `CLAUDE_CODE_PROMPT_CACHING=1`. The Anthropic API caches the system prompt and CLAUDE.md context across requests, targeting 25-30% cost reduction on repeated interactions with the same group.
+
+Cache read and creation tokens are tracked separately in the token usage logs so you can measure actual savings.
+
+### Token Usage Logging
+
+Every agent session writes a token usage record to the `token_usage` SQLite table:
+
+| Column | Description |
+|--------|-------------|
+| `timestamp` | When the session ended |
+| `group_folder` | Which group ran the query |
+| `model` | Model ID used (e.g., `claude-sonnet-4-20250514`) |
+| `input_tokens` | Total input tokens consumed |
+| `output_tokens` | Total output tokens consumed |
+| `cache_read_tokens` | Tokens served from prompt cache |
+| `cache_creation_tokens` | Tokens used to create cache entries |
+| `session_id` | Agent session identifier |
+| `task_type` | `message` or `scheduled_task` |
+
+Query your costs:
+```sql
+SELECT group_folder, model, SUM(input_tokens) as total_in, SUM(output_tokens) as total_out
+FROM token_usage
+GROUP BY group_folder, model
+ORDER BY total_out DESC;
+```
+
+### Smart Polling Schedule
+
+Time-of-day-aware polling frequency that reduces unnecessary API calls during off-hours:
+
+| Period | Hours | Polling Interval |
+|--------|-------|------------------|
+| Daytime | 7am – 8pm | Every 5 minutes |
+| Evening | 8pm – 11pm | Every 30 minutes |
+| Overnight | 11pm – 7am | Every 2 hours |
+
+Disabled by default. Enable with `SMART_POLLING_ENABLED=true` in `.env`. All intervals are configurable via `DAYTIME_POLL_INTERVAL`, `EVENING_POLL_INTERVAL`, and `OVERNIGHT_POLL_INTERVAL` (in milliseconds). Uses the configured `TZ` timezone.
+
+Designed as a pluggable framework — future channels (Teams, Outlook, etc.) will integrate directly with this scheduler.
+
+### 4-Tier Memory Architecture
+
+| Tier | Storage | What It Holds | How Agents Access It |
+|------|---------|---------------|---------------------|
+| 1 — Active Context | Claude's context window | Current conversation | Automatic (native) |
+| 2 — Per-Contact History | `messages` SQLite table | Full message history per chat | Loaded into prompts by the orchestrator |
+| 3 — Business Facts | `business_facts` SQLite table | Persistent key-value facts organized by category | MCP tools: `store_business_fact`, `get_business_facts`, `search_business_facts` |
+| 4 — Semantic Search | ChromaDB vector store (Docker service) | Chunked + embedded conversations, transcripts, digests | MCP tool: `semantic_search` |
+
+**Tier 3 — Business Facts** allow agents to remember structured information across sessions. Facts are organized by category (`contact`, `process`, `preference`, `reference`, `general`) and persist in SQLite. A snapshot is written to each container's IPC directory before every agent run.
+
+**Tier 4 — Semantic Search** uses ChromaDB with built-in embeddings (no external API needed). Conversations are automatically chunked, embedded, and stored. Agents can search using natural language queries like *"What did we discuss about the marketing budget?"*
+
+To enable Tier 4, set `CHROMA_ENABLED=true` and start ChromaDB:
+```bash
+docker compose up -d chromadb
+```
 ## Contributing
 
 **Don't add features. Add skills.**
@@ -123,22 +238,39 @@ Skills we'd like to see:
 
 ```
 Channels --> SQLite --> Polling loop --> Container (Claude Agent SDK) --> Response
+                          |                    |
+                          |                    +--> Model Router (Haiku/Sonnet/Opus)
+                          |                    +--> Loop Guards (turn + token limits)
+                          |                    +--> Token Logger --> IPC --> SQLite
+                          |                    +--> MCP Tools (facts, search, tasks, Senri CRM)
+                          |                    +--> MS365 MCP (Teams, Outlook, SharePoint)
+                          |
+                     Smart Polling
+                   (time-of-day aware)
 ```
 
-Single Node.js process. Channels are added via skills and self-register at startup — the orchestrator connects whichever ones have credentials present. Agents execute in isolated Linux containers with filesystem isolation. Only mounted directories are accessible. Per-group message queue with concurrency control. IPC via filesystem.
+Single Node.js process. Channels are added via skills and self-register at startup — the orchestrator connects whichever ones have credentials present. Agents execute in isolated Linux containers with filesystem isolation. Only mounted directories are accessible. Bash access is safe because commands run inside the container, not on your host. Per-group message queue with concurrency control. IPC via filesystem.
 
 For the full architecture details, see [docs/SPEC.md](docs/SPEC.md).
 
 Key files:
-- `src/index.ts` - Orchestrator: state, message loop, agent invocation
+- `src/index.ts` - Orchestrator: state, message loop, agent invocation, ChromaDB init, smart polling
 - `src/channels/registry.ts` - Channel registry (self-registration at startup)
-- `src/ipc.ts` - IPC watcher and task processing
+- `src/ipc.ts` - IPC watcher: messages, tasks, guard logs, token logs, facts, semantic search
 - `src/router.ts` - Message formatting and outbound routing
 - `src/group-queue.ts` - Per-group queue with global concurrency limit
-- `src/container-runner.ts` - Spawns streaming agent containers
+- `src/container-runner.ts` - Spawns streaming agent containers, writes fact snapshots
 - `src/task-scheduler.ts` - Runs scheduled tasks
-- `src/db.ts` - SQLite operations (messages, groups, sessions, state)
+- `src/db.ts` - SQLite operations (messages, groups, sessions, state, token usage, guard logs, business facts)
+- `src/polling-scheduler.ts` - Time-of-day-aware polling intervals
+- `src/chromadb.ts` - ChromaDB vector store client (Tier 4 memory)
+- `src/config.ts` - All configuration constants from environment
+- `container/agent-runner/src/index.ts` - Agent entry point: loop guards, prompt caching, token logging
+- `container/agent-runner/src/router.ts` - Model routing logic (selectModel): Haiku/Sonnet/Opus selection rules
+- `container/agent-runner/src/ipc-mcp-stdio.ts` - MCP tools exposed to agents (send_message, tasks, facts, search, Senri CRM)
+- `container/agent-runner/src/senri.ts` - Senri CRM API client (token cache, senriGet helper)
 - `groups/*/CLAUDE.md` - Per-group memory
+- `docker-compose.yml` - ChromaDB service for Tier 4 memory
 
 ## FAQ
 
@@ -174,6 +306,45 @@ This allows you to use:
 
 Note: The model must support the Anthropic API format for best compatibility.
 
+**What environment variables are available?**
+
+```bash
+# Core
+ASSISTANT_NAME=Andy              # Trigger name for the bot
+ANTHROPIC_API_KEY=sk-ant-...     # Required for model access
+
+# Container
+CONTAINER_IMAGE=nanoclaw-agent:latest
+CONTAINER_TIMEOUT=90000          # 90s silence watchdog (kills frozen containers)
+IDLE_TIMEOUT=1800000             # 30 min idle before container exit
+MAX_CONCURRENT_CONTAINERS=5
+
+# Timezone
+TZ=Asia/Kolkata
+
+# Smart Polling (optional, disabled by default)
+SMART_POLLING_ENABLED=false
+DAYTIME_POLL_INTERVAL=300000     # 5 min (7am-8pm)
+EVENING_POLL_INTERVAL=1800000    # 30 min (8pm-11pm)
+OVERNIGHT_POLL_INTERVAL=7200000  # 2 hrs (11pm-7am)
+
+# ChromaDB / Tier 4 Memory (optional, disabled by default)
+CHROMA_ENABLED=false
+CHROMA_HOST=http://localhost
+CHROMA_PORT=8000
+
+# Senri CRM (optional — set both to enable 10 Senri tools)
+SENRI_API_KEY=
+SENRI_API_SECRET=
+
+# Microsoft 365 (optional — requires MS365 MCP HTTP server on host)
+MS365_ENABLED=false
+
+# Third-party model endpoints (optional)
+ANTHROPIC_BASE_URL=https://your-api-endpoint.com
+ANTHROPIC_AUTH_TOKEN=your-token-here
+```
+
 **How do I debug issues?**
 
 Ask Claude Code. "Why isn't the scheduler running?" "What's in the recent logs?" "Why did this message not get a response?" That's the AI-native approach that underlies NanoClaw.
@@ -193,6 +364,21 @@ This keeps the base system minimal and lets every user customize their installat
 ## Community
 
 Questions? Ideas? [Join the Discord](https://discord.gg/VDdww8qS42).
+
+## Project Status
+
+| Feature | Status |
+|---------|--------|
+| Multi-model routing (Haiku/Sonnet/Opus) | ✅ Implemented and tested |
+| Smart polling schedule | ✅ Implemented and tested |
+| Loop guards (timeout + error cap + token budget) | ✅ Implemented and tested |
+| WhatsApp alerts on guard triggers | ✅ Implemented and tested |
+| Prompt caching | ✅ Enabled (native Anthropic API) |
+| Token usage logging to SQLite | ✅ Implemented and tested |
+| 4-tier memory architecture | ✅ Implemented and tested (17 tests) |
+| Senri CRM integration (10 tools) | ✅ Implemented and tested (10 tests) |
+| Microsoft Teams / Outlook / SharePoint (MS365 MCP) | ✅ Implemented (requires host-side MS365 server) |
+| Voice note transcription (mlx-whisper) | 🔜 Planned |
 
 ## Changelog
 

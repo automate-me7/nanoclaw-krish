@@ -82,6 +82,42 @@ function createSchema(database: Database.Database): void {
       container_config TEXT,
       requires_trigger INTEGER DEFAULT 1
     );
+
+    CREATE TABLE IF NOT EXISTS guard_logs (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      timestamp TEXT NOT NULL,
+      group_folder TEXT NOT NULL,
+      reason TEXT NOT NULL,
+      turn_count INTEGER,
+      token_count INTEGER,
+      task_type TEXT
+    );
+
+    CREATE TABLE IF NOT EXISTS token_usage (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      timestamp TEXT NOT NULL,
+      group_folder TEXT NOT NULL,
+      model TEXT NOT NULL,
+      input_tokens INTEGER NOT NULL,
+      output_tokens INTEGER NOT NULL,
+      cache_read_tokens INTEGER DEFAULT 0,
+      cache_creation_tokens INTEGER DEFAULT 0,
+      session_id TEXT,
+      task_type TEXT DEFAULT 'message'
+    );
+    CREATE INDEX IF NOT EXISTS idx_token_usage_group ON token_usage(group_folder);
+    CREATE INDEX IF NOT EXISTS idx_token_usage_ts ON token_usage(timestamp);
+
+    CREATE TABLE IF NOT EXISTS business_facts (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      key TEXT NOT NULL UNIQUE,
+      value TEXT NOT NULL,
+      category TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_business_facts_category ON business_facts(category);
+    CREATE INDEX IF NOT EXISTS idx_business_facts_key ON business_facts(key);
   `);
 
   // Add context_mode column if it doesn't exist (migration for existing DBs)
@@ -536,15 +572,15 @@ export function getRegisteredGroup(
     .prepare('SELECT * FROM registered_groups WHERE jid = ?')
     .get(jid) as
     | {
-        jid: string;
-        name: string;
-        folder: string;
-        trigger_pattern: string;
-        added_at: string;
-        container_config: string | null;
-        requires_trigger: number | null;
-        is_main: number | null;
-      }
+      jid: string;
+      name: string;
+      folder: string;
+      trigger_pattern: string;
+      added_at: string;
+      container_config: string | null;
+      requires_trigger: number | null;
+      is_main: number | null;
+    }
     | undefined;
   if (!row) return undefined;
   if (!isValidGroupFolder(row.folder)) {
@@ -632,7 +668,10 @@ function migrateJsonState(): void {
     if (!fs.existsSync(filePath)) return null;
     try {
       const data = JSON.parse(fs.readFileSync(filePath, 'utf-8'));
-      fs.renameSync(filePath, `${filePath}.migrated`);
+      // Instead of renaming the file and breaking user experience/agent skills,
+      // we just mark that we've migrated it but keep the original intact.
+      fs.copyFileSync(filePath, `${filePath}.migrated`);
+      // We do not delete or rename the original `filePath`
       return data;
     } catch {
       return null;
@@ -684,4 +723,112 @@ function migrateJsonState(): void {
       }
     }
   }
+}
+
+// --- Guard logs ---
+
+export function logGuardTrigger(log: {
+  group_folder: string;
+  reason: string;
+  turn_count?: number;
+  token_count?: number;
+  task_type?: string;
+}): void {
+  db.prepare(
+    `INSERT INTO guard_logs (timestamp, group_folder, reason, turn_count, token_count, task_type)
+     VALUES (?, ?, ?, ?, ?, ?)`,
+  ).run(
+    new Date().toISOString(),
+    log.group_folder,
+    log.reason,
+    log.turn_count ?? null,
+    log.token_count ?? null,
+    log.task_type ?? null,
+  );
+}
+
+// --- Token usage logging ---
+
+export function logTokenUsage(log: {
+  group_folder: string;
+  model: string;
+  input_tokens: number;
+  output_tokens: number;
+  cache_read_tokens?: number;
+  cache_creation_tokens?: number;
+  session_id?: string;
+  task_type?: string;
+}): void {
+  console.log('[TOKEN IPC] Logged to SQLite:', JSON.stringify(log));
+  db.prepare(
+    `INSERT INTO token_usage (timestamp, group_folder, model, input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens, session_id, task_type)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+  ).run(
+    new Date().toISOString(),
+    log.group_folder,
+    log.model,
+    log.input_tokens,
+    log.output_tokens,
+    log.cache_read_tokens ?? 0,
+    log.cache_creation_tokens ?? 0,
+    log.session_id ?? null,
+    log.task_type ?? 'message',
+  );
+}
+
+// --- Business facts (Tier 3 memory) ---
+
+export interface BusinessFact {
+  id: number;
+  key: string;
+  value: string;
+  category: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export function upsertBusinessFact(
+  key: string,
+  value: string,
+  category: string,
+): void {
+  const now = new Date().toISOString();
+  db.prepare(
+    `INSERT INTO business_facts (key, value, category, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?)
+     ON CONFLICT(key) DO UPDATE SET value = excluded.value, category = excluded.category, updated_at = excluded.updated_at`,
+  ).run(key, value, category, now, now);
+}
+
+export function getBusinessFact(key: string): BusinessFact | undefined {
+  return db
+    .prepare('SELECT * FROM business_facts WHERE key = ?')
+    .get(key) as BusinessFact | undefined;
+}
+
+export function getBusinessFactsByCategory(
+  category: string,
+): BusinessFact[] {
+  return db
+    .prepare('SELECT * FROM business_facts WHERE category = ? ORDER BY key')
+    .all(category) as BusinessFact[];
+}
+
+export function getAllBusinessFacts(): BusinessFact[] {
+  return db
+    .prepare('SELECT * FROM business_facts ORDER BY category, key')
+    .all() as BusinessFact[];
+}
+
+export function deleteBusinessFact(key: string): void {
+  db.prepare('DELETE FROM business_facts WHERE key = ?').run(key);
+}
+
+export function searchBusinessFacts(query: string): BusinessFact[] {
+  const pattern = `%${query}%`;
+  return db
+    .prepare(
+      `SELECT * FROM business_facts WHERE key LIKE ? OR value LIKE ? OR category LIKE ? ORDER BY updated_at DESC LIMIT 50`,
+    )
+    .all(pattern, pattern, pattern) as BusinessFact[];
 }

@@ -25,6 +25,7 @@ import {
 } from './container-runtime.js';
 import { validateAdditionalMounts } from './mount-security.js';
 import { RegisteredGroup } from './types.js';
+import { getAllBusinessFacts } from './db.js';
 
 // Sentinel markers for robust output parsing (must match agent-runner)
 const OUTPUT_START_MARKER = '---NANOCLAW_OUTPUT_START---';
@@ -188,8 +189,8 @@ function buildVolumeMounts(
     group.folder,
     'agent-runner-src',
   );
-  if (!fs.existsSync(groupAgentRunnerDir) && fs.existsSync(agentRunnerSrc)) {
-    fs.cpSync(agentRunnerSrc, groupAgentRunnerDir, { recursive: true });
+  if (fs.existsSync(agentRunnerSrc)) {
+    fs.cpSync(agentRunnerSrc, groupAgentRunnerDir, { recursive: true, force: true });
   }
   mounts.push({
     hostPath: groupAgentRunnerDir,
@@ -220,6 +221,9 @@ function readSecrets(): Record<string, string> {
     'ANTHROPIC_API_KEY',
     'ANTHROPIC_BASE_URL',
     'ANTHROPIC_AUTH_TOKEN',
+    'SENRI_API_KEY',
+    'SENRI_API_SECRET',
+    'MS365_ENABLED',
   ]);
 }
 
@@ -699,4 +703,17 @@ export function writeGroupsSnapshot(
       2,
     ),
   );
+}
+
+/**
+ * Write business facts snapshot for the container to read.
+ * Agents access this via the get_business_facts and search_business_facts MCP tools.
+ */
+export function writeBusinessFactsSnapshot(groupFolder: string): void {
+  const groupIpcDir = resolveGroupIpcPath(groupFolder);
+  fs.mkdirSync(groupIpcDir, { recursive: true });
+
+  const facts = getAllBusinessFacts();
+  const factsFile = path.join(groupIpcDir, 'business_facts.json');
+  fs.writeFileSync(factsFile, JSON.stringify(facts, null, 2));
 }
