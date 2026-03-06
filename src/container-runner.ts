@@ -4,6 +4,7 @@
  */
 import { ChildProcess, exec, spawn } from 'child_process';
 import fs from 'fs';
+import os from 'os';
 import path from 'path';
 
 import {
@@ -200,6 +201,37 @@ function buildVolumeMounts(
     containerPath: '/app/src',
     readonly: false,
   });
+
+  // Gmail account 1 credentials (OAuth tokens for @gongrzhe/server-gmail-autoauth-mcp)
+  const homeDir = os.homedir();
+  const gmail1Dir = path.join(homeDir, '.gmail-mcp-1');
+  if (fs.existsSync(gmail1Dir)) {
+    mounts.push({
+      hostPath: gmail1Dir,
+      containerPath: '/home/node/.gmail-mcp-1',
+      readonly: false, // MCP may refresh OAuth tokens
+    });
+  }
+
+  // Gmail account 2 credentials
+  const gmail2Dir = path.join(homeDir, '.gmail-mcp-2');
+  if (fs.existsSync(gmail2Dir)) {
+    mounts.push({
+      hostPath: gmail2Dir,
+      containerPath: '/home/node/.gmail-mcp-2',
+      readonly: false,
+    });
+  }
+
+  // Google Calendar credentials (OAuth tokens for @gongrzhe/server-calendar-autoauth-mcp)
+  const gcalDir = path.join(homeDir, '.gcal-mcp');
+  if (fs.existsSync(gcalDir)) {
+    mounts.push({
+      hostPath: gcalDir,
+      containerPath: '/home/node/.gcal-mcp',
+      readonly: false,
+    });
+  }
 
   // Additional mounts validated against external allowlist (tamper-proof from containers)
   if (group.containerConfig?.additionalMounts) {

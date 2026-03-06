@@ -69,8 +69,10 @@ Then run `/setup`. Claude Code handles everything: dependencies, authentication,
 - **Smart polling schedule** - Time-of-day-aware message polling (fast by day, slow overnight)
 - **4-tier memory** - Active context → per-contact history → business facts → semantic vector search
 - **Senri CRM** - 10 MCP tools for customers, visits, transactions, products, inventory, and reminders
-- **Microsoft 365** - Teams, Outlook, and SharePoint access via MS365 MCP HTTP server
-- **Optional integrations** - Add Gmail (`/add-gmail`) and more via skills
+- **Microsoft 365** - Teams, Outlook, SharePoint, and Planner via MS365 MCP HTTP server
+- **Gmail** - 2-account support for reading, sending, searching, and drafting emails
+- **Google Calendar** - Create, read, update, and delete calendar events
+- **Optional integrations** - Add more channels via skills
 
 ## Usage
 
@@ -243,7 +245,9 @@ Channels --> SQLite --> Polling loop --> Container (Claude Agent SDK) --> Respon
                           |                    +--> Loop Guards (turn + token limits)
                           |                    +--> Token Logger --> IPC --> SQLite
                           |                    +--> MCP Tools (facts, search, tasks, Senri CRM)
-                          |                    +--> MS365 MCP (Teams, Outlook, SharePoint)
+                          |                    +--> MS365 MCP (Teams, Outlook, Planner, SharePoint)
+                          |                    +--> Gmail MCP ×2 (2 accounts)
+                          |                    +--> Google Calendar MCP
                           |
                      Smart Polling
                    (time-of-day aware)
@@ -340,6 +344,9 @@ SENRI_API_SECRET=
 # Microsoft 365 (optional — requires MS365 MCP HTTP server on host)
 MS365_ENABLED=false
 
+# Gmail & Google Calendar (file-based OAuth — no env vars)
+# Credentials: ~/.gmail-mcp-1/, ~/.gmail-mcp-2/, ~/.gcal-mcp/
+
 # Third-party model endpoints (optional)
 ANTHROPIC_BASE_URL=https://your-api-endpoint.com
 ANTHROPIC_AUTH_TOKEN=your-token-here
@@ -378,6 +385,9 @@ Questions? Ideas? [Join the Discord](https://discord.gg/VDdww8qS42).
 | 4-tier memory architecture | ✅ Implemented and tested (17 tests) |
 | Senri CRM integration (10 tools) | ✅ Implemented and tested (10 tests) |
 | Microsoft Teams / Outlook / SharePoint (MS365 MCP) | ✅ Implemented (requires host-side MS365 server) |
+| Microsoft Planner (MS365 MCP) | ✅ Included in MS365 MCP (create, list, get tasks) |
+| Gmail (2-account support) | ✅ Implemented (file-based OAuth) |
+| Google Calendar | ✅ Implemented (file-based OAuth) |
 | Voice note transcription (mlx-whisper) | 🔜 Planned |
 
 ## Changelog

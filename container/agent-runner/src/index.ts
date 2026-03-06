@@ -542,6 +542,9 @@ async function runQuery(
         'NotebookEdit',
         'mcp__nanoclaw__*',
         'mcp__ms365__*',
+        'mcp__gmail1__*',
+        'mcp__gmail2__*',
+        'mcp__gcal__*',
       ],
       env: sdkEnv,
       permissionMode: 'bypassPermissions',
@@ -565,6 +568,21 @@ async function runQuery(
             url: 'http://host.docker.internal:3100/mcp',
           },
         } : {}),
+        gmail1: {
+          command: 'npx',
+          args: ['-y', '@gongrzhe/server-gmail-autoauth-mcp'],
+          env: { HOME: '/home/node/.gmail-mcp-1' },
+        },
+        gmail2: {
+          command: 'npx',
+          args: ['-y', '@gongrzhe/server-gmail-autoauth-mcp'],
+          env: { HOME: '/home/node/.gmail-mcp-2' },
+        },
+        gcal: {
+          command: 'npx',
+          args: ['-y', '@gongrzhe/server-calendar-autoauth-mcp'],
+          env: { HOME: '/home/node/.gcal-mcp' },
+        },
       },
       hooks: {
         PreCompact: [{ hooks: [createPreCompactHook(containerInput.assistantName)] }],
