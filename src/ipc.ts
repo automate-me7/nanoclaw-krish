@@ -3,7 +3,12 @@ import path from 'path';
 
 import { CronExpressionParser } from 'cron-parser';
 
-import { DATA_DIR, IPC_POLL_INTERVAL, TIMEZONE, CHROMA_ENABLED } from './config.js';
+import {
+  DATA_DIR,
+  IPC_POLL_INTERVAL,
+  TIMEZONE,
+  CHROMA_ENABLED,
+} from './config.js';
 import { AvailableGroup } from './container-runner.js';
 import {
   createTask,
@@ -191,15 +196,25 @@ export function startIpcWatcher(deps: IpcDeps): void {
                   const alertMessage = isSoftWarning
                     ? `⚠️ *Token Budget Warning:* Usage at ${data.token_count} tokens (soft limit: 50,000). The session is still running but approaching the hard limit.`
                     : `🛑 *System Alert:* Agent session terminated automatically. Reason: ${data.reason}. Tokens: ${data.token_count}, Turns: ${data.turn_count}.`;
-                  deps.sendMessage(targetJid, alertMessage).catch(err => {
-                    logger.error({ err, targetJid }, 'Failed to send guard trigger alert');
+                  deps.sendMessage(targetJid, alertMessage).catch((err) => {
+                    logger.error(
+                      { err, targetJid },
+                      'Failed to send guard trigger alert',
+                    );
                   });
                 } else {
-                  logger.warn({ groupFolder }, 'Could not find target JID to send guard trigger alert');
+                  logger.warn(
+                    { groupFolder },
+                    'Could not find target JID to send guard trigger alert',
+                  );
                 }
 
                 logger.info(
-                  { reason: data.reason, group: sourceGroup, alerted: !!targetJid },
+                  {
+                    reason: data.reason,
+                    group: sourceGroup,
+                    alerted: !!targetJid,
+                  },
                   'Guard trigger logged and alerted',
                 );
               }
@@ -214,7 +229,10 @@ export function startIpcWatcher(deps: IpcDeps): void {
           }
         }
       } catch (err) {
-        logger.error({ err, sourceGroup }, 'Error reading guard logs directory');
+        logger.error(
+          { err, sourceGroup },
+          'Error reading guard logs directory',
+        );
       }
 
       // Process token usage logs from this group's IPC directory
@@ -225,7 +243,9 @@ export function startIpcWatcher(deps: IpcDeps): void {
             .readdirSync(tokenLogsDir)
             .filter((f) => f.endsWith('.json'));
           if (tokenFiles.length > 0) {
-            console.log(`[TOKEN IPC] Detected ${tokenFiles.length} token usage file(s) in ${tokenLogsDir}`);
+            console.log(
+              `[TOKEN IPC] Detected ${tokenFiles.length} token usage file(s) in ${tokenLogsDir}`,
+            );
           }
           for (const file of tokenFiles) {
             console.log(`[TOKEN IPC] Processing token file: ${file}`);
@@ -264,13 +284,24 @@ export function startIpcWatcher(deps: IpcDeps): void {
           }
         }
       } catch (err) {
-        logger.error({ err, sourceGroup }, 'Error reading token logs directory');
+        logger.error(
+          { err, sourceGroup },
+          'Error reading token logs directory',
+        );
       }
 
       // Process semantic search requests
-      const searchRequestsDir = path.join(ipcBaseDir, sourceGroup, 'search_requests');
+      const searchRequestsDir = path.join(
+        ipcBaseDir,
+        sourceGroup,
+        'search_requests',
+      );
       try {
-        if (fs.existsSync(searchRequestsDir) && CHROMA_ENABLED && isChromaAvailable()) {
+        if (
+          fs.existsSync(searchRequestsDir) &&
+          CHROMA_ENABLED &&
+          isChromaAvailable()
+        ) {
           const searchFiles = fs
             .readdirSync(searchRequestsDir)
             .filter((f) => f.endsWith('.json'));
@@ -284,15 +315,26 @@ export function startIpcWatcher(deps: IpcDeps): void {
                   data.max_results || 5,
                 );
                 // Write results for the agent to read
-                const resultsDir = path.join(ipcBaseDir, sourceGroup, 'search_results');
+                const resultsDir = path.join(
+                  ipcBaseDir,
+                  sourceGroup,
+                  'search_results',
+                );
                 fs.mkdirSync(resultsDir, { recursive: true });
-                const resultFile = path.join(resultsDir, `${data.request_id}.json`);
+                const resultFile = path.join(
+                  resultsDir,
+                  `${data.request_id}.json`,
+                );
                 const tempPath = `${resultFile}.tmp`;
                 fs.writeFileSync(tempPath, JSON.stringify({ results }));
                 fs.renameSync(tempPath, resultFile);
 
                 logger.debug(
-                  { group: sourceGroup, query: data.query, resultCount: results.length },
+                  {
+                    group: sourceGroup,
+                    query: data.query,
+                    resultCount: results.length,
+                  },
                   'Semantic search completed',
                 );
               }
@@ -307,7 +349,10 @@ export function startIpcWatcher(deps: IpcDeps): void {
           }
         }
       } catch (err) {
-        logger.error({ err, sourceGroup }, 'Error reading search requests directory');
+        logger.error(
+          { err, sourceGroup },
+          'Error reading search requests directory',
+        );
       }
     }
 
@@ -550,7 +595,12 @@ export async function processTaskIpc(
 
     default:
       // Handle store_fact IPC for Tier 3 memory
-      if (data.type === 'store_fact' && 'key' in data && 'value' in data && 'category' in data) {
+      if (
+        data.type === 'store_fact' &&
+        'key' in data &&
+        'value' in data &&
+        'category' in data
+      ) {
         const key = data.key as string;
         const value = data.value as string;
         const category = data.category as string;

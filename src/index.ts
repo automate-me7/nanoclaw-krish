@@ -46,7 +46,11 @@ import { startIpcWatcher } from './ipc.js';
 import { findChannel, formatMessages, formatOutbound } from './router.js';
 import { startSchedulerLoop } from './task-scheduler.js';
 import { Channel, NewMessage, RegisteredGroup } from './types.js';
-import { initChromaDB, ingestConversation, isChromaAvailable } from './chromadb.js';
+import {
+  initChromaDB,
+  ingestConversation,
+  isChromaAvailable,
+} from './chromadb.js';
 import { startPollingScheduler } from './polling-scheduler.js';
 import { logger } from './logger.js';
 
@@ -260,7 +264,10 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
         group.folder,
       );
     } catch (err) {
-      logger.warn({ err, group: group.name }, 'ChromaDB ingestion failed (non-fatal)');
+      logger.warn(
+        { err, group: group.name },
+        'ChromaDB ingestion failed (non-fatal)',
+      );
     }
   }
 
@@ -307,12 +314,12 @@ async function runAgent(
   // Wrap onOutput to track session ID from streamed results
   const wrappedOnOutput = onOutput
     ? async (output: ContainerOutput) => {
-      if (output.newSessionId) {
-        sessions[group.folder] = output.newSessionId;
-        setSession(group.folder, output.newSessionId);
+        if (output.newSessionId) {
+          sessions[group.folder] = output.newSessionId;
+          setSession(group.folder, output.newSessionId);
+        }
+        await onOutput(output);
       }
-      await onOutput(output);
-    }
     : undefined;
 
   try {
@@ -588,7 +595,7 @@ async function main(): Promise<void> {
 const isDirectRun =
   process.argv[1] &&
   new URL(import.meta.url).pathname ===
-  new URL(`file://${process.argv[1]}`).pathname;
+    new URL(`file://${process.argv[1]}`).pathname;
 
 if (isDirectRun) {
   main().catch((err) => {

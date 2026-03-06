@@ -572,15 +572,15 @@ export function getRegisteredGroup(
     .prepare('SELECT * FROM registered_groups WHERE jid = ?')
     .get(jid) as
     | {
-      jid: string;
-      name: string;
-      folder: string;
-      trigger_pattern: string;
-      added_at: string;
-      container_config: string | null;
-      requires_trigger: number | null;
-      is_main: number | null;
-    }
+        jid: string;
+        name: string;
+        folder: string;
+        trigger_pattern: string;
+        added_at: string;
+        container_config: string | null;
+        requires_trigger: number | null;
+        is_main: number | null;
+      }
     | undefined;
   if (!row) return undefined;
   if (!isValidGroupFolder(row.folder)) {
@@ -801,14 +801,12 @@ export function upsertBusinessFact(
 }
 
 export function getBusinessFact(key: string): BusinessFact | undefined {
-  return db
-    .prepare('SELECT * FROM business_facts WHERE key = ?')
-    .get(key) as BusinessFact | undefined;
+  return db.prepare('SELECT * FROM business_facts WHERE key = ?').get(key) as
+    | BusinessFact
+    | undefined;
 }
 
-export function getBusinessFactsByCategory(
-  category: string,
-): BusinessFact[] {
+export function getBusinessFactsByCategory(category: string): BusinessFact[] {
   return db
     .prepare('SELECT * FROM business_facts WHERE category = ? ORDER BY key')
     .all(category) as BusinessFact[];
