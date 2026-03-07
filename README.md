@@ -72,6 +72,7 @@ Then run `/setup`. Claude Code handles everything: dependencies, authentication,
 - **Microsoft 365** - Teams, Outlook, SharePoint, and Planner via MS365 MCP HTTP server
 - **Gmail** - 2-account support for reading, sending, searching, and drafting emails
 - **Google Calendar** - Create, read, update, and delete calendar events
+- **YouTube Transcripts** - Extract transcripts and subtitles from public YouTube videos
 - **Optional integrations** - Add more channels via skills
 
 ## Usage
@@ -248,6 +249,7 @@ Channels --> SQLite --> Polling loop --> Container (Claude Agent SDK) --> Respon
                           |                    +--> MS365 MCP (Teams, Outlook, Planner, SharePoint)
                           |                    +--> Gmail MCP ×2 (2 accounts)
                           |                    +--> Google Calendar MCP
+                          |                    +--> YouTube Transcript MCP
                           |
                      Smart Polling
                    (time-of-day aware)
@@ -388,6 +390,7 @@ Questions? Ideas? [Join the Discord](https://discord.gg/VDdww8qS42).
 | Microsoft Planner (MS365 MCP) | ✅ Included in MS365 MCP (create, list, get tasks) |
 | Gmail (2-account support) | ✅ Implemented (file-based OAuth) |
 | Google Calendar | ✅ Implemented (file-based OAuth) |
+| YouTube Transcripts | ✅ Implemented (MCP server) |
 | Voice note transcription (mlx-whisper) | 🔜 Planned |
 
 ## Changelog

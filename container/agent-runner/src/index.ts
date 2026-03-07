@@ -545,6 +545,7 @@ async function runQuery(
         'mcp__gmail1__*',
         'mcp__gmail2__*',
         'mcp__gcal__*',
+        'mcp__youtube__*',
       ],
       env: sdkEnv,
       permissionMode: 'bypassPermissions',
@@ -582,6 +583,10 @@ async function runQuery(
           command: 'npx',
           args: ['-y', '@gongrzhe/server-calendar-autoauth-mcp'],
           env: { HOME: '/home/node/.gcal-mcp' },
+        },
+        youtube: {
+          command: 'npx',
+          args: ['-y', '@kimtaeyoon83/mcp-server-youtube-transcript'],
         },
       },
       hooks: {
